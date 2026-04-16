@@ -56,32 +56,63 @@ Veredictos posibles:
 
 El skill mantiene un registro mínimo en `~/.claude/skill-audits.json` con solo metadatos (nombre, hashes por archivo, fecha, veredicto, archivos auditados), nunca el contenido de los archivos. Este registro alimenta la detección de drift en auditorías posteriores.
 
+## Compatibilidad
+
+Funciona en **macOS**, **Linux** y **Windows**. El skill detecta el sistema operativo del host en cada ejecución y adapta:
+
+- **Rutas**: `~/.claude/skills/` en Unix; `%USERPROFILE%\.claude\skills\` en Windows.
+- **Comandos de hash**: `shasum -a 256` (macOS), `sha256sum` (Linux), `Get-FileHash` (PowerShell) o `certutil -hashfile` (cmd).
+- **Comandos de descubrimiento**: `ls` en Unix, `Get-ChildItem` en PowerShell, `dir /b /ad` en cmd.
+- **Patrones de análisis estático**: además de los universales, se aplican reglas específicas para Unix (`~/.ssh`, `crontab`, `.bashrc`) **y** para Windows (registro, tareas programadas, LOLBins como `certutil`/`bitsadmin`/`regsvr32`, PowerShell download cradles, ejecución codificada). Los patrones de ambas plataformas se aplican siempre, porque un script puede atacar Windows desde un skill descargado en macOS.
+
 ## Instalación
 
 Este skill está diseñado para Claude Code. Puedes instalarlo de forma **global** (disponible en todas tus sesiones) o **por proyecto**.
 
-### Instalación global
+### macOS / Linux
 
+Instalación global:
 ```bash
 mkdir -p ~/.claude/skills/skill-auditor
 curl -fsSL https://raw.githubusercontent.com/arochaoscar/skill-auditor/main/SKILL.md \
   -o ~/.claude/skills/skill-auditor/SKILL.md
 ```
 
-### Instalación por proyecto
-
-Desde la raíz del proyecto:
-
+Instalación por proyecto (desde la raíz del proyecto):
 ```bash
 mkdir -p .claude/skills/skill-auditor
 curl -fsSL https://raw.githubusercontent.com/arochaoscar/skill-auditor/main/SKILL.md \
   -o .claude/skills/skill-auditor/SKILL.md
 ```
 
-### Instalación por git clone
+### Windows (PowerShell)
+
+Instalación global:
+```powershell
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\skills\skill-auditor" | Out-Null
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/arochaoscar/skill-auditor/main/SKILL.md" `
+  -OutFile "$env:USERPROFILE\.claude\skills\skill-auditor\SKILL.md"
+```
+
+Instalación por proyecto:
+```powershell
+New-Item -ItemType Directory -Force -Path ".claude\skills\skill-auditor" | Out-Null
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/arochaoscar/skill-auditor/main/SKILL.md" `
+  -OutFile ".claude\skills\skill-auditor\SKILL.md"
+```
+
+### Instalación por git clone (cualquier plataforma)
 
 ```bash
+# macOS / Linux
 git clone https://github.com/arochaoscar/skill-auditor.git ~/.claude/skills/skill-auditor
+```
+
+```powershell
+# Windows
+git clone https://github.com/arochaoscar/skill-auditor.git "$env:USERPROFILE\.claude\skills\skill-auditor"
 ```
 
 ### Verificación

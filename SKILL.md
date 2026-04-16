@@ -45,12 +45,42 @@ específica y recomendaciones accionables.
   neutraliza un 🔴 ni un CVE con severidad alta. Una compañía reconocida puede
   publicar un skill comprometido (cuenta hackeada, empleado malicioso, dependency
   confusion). Evidencia > reputación, siempre.
+- **Cross-platform**: el skill opera en macOS, Linux y Windows. Detecta el sistema
+  operativo del host y adapta comandos, rutas y patrones de análisis. Los skills
+  maliciosos tienen superficies distintas en cada plataforma: en Unix atacan
+  `~/.ssh`, `~/.bashrc` y `crontab`; en Windows atacan el registro, tareas
+  programadas, LOLBins (`certutil`, `bitsadmin`, `regsvr32`) y descarga-y-ejecuta
+  con PowerShell. Todas se revisan.
 
 ---
 
 ## Paso 1 — Identificar el alcance del análisis
 
-Determina qué tipo de entrada dio el usuario y prepara el inventario.
+Determina el sistema operativo del host, el tipo de entrada del usuario y
+prepara el inventario.
+
+### 1.0 — Detectar plataforma
+
+Antes de cualquier otro paso, detecta la plataforma. Esto decide qué rutas,
+comandos y patrones usar en el resto del pipeline.
+
+```bash
+# Unix (macOS/Linux)
+uname -s   # Darwin = macOS, Linux = Linux
+```
+
+```powershell
+# Windows PowerShell
+$PSVersionTable.Platform   # Win32NT
+# o
+[System.Environment]::OSVersion.Platform
+```
+
+Clasifica el host como **macOS**, **Linux** o **Windows** y guárdalo como
+variable para el resto de la ejecución. Si el skill se instaló en una ruta
+estilo Unix en Windows (por ejemplo, desde Git Bash o WSL), trátalo como
+**Unix** para paths pero aplica también los patrones de Windows al contenido,
+porque los scripts pueden invocar PowerShell desde Bash.
 
 ### 1a — Entrada única (un solo skill)
 
@@ -67,8 +97,10 @@ Determina qué tipo de entrada dio el usuario y prepara el inventario.
 ### 1b — Modo descubrimiento (todos los skills instalados)
 
 Si el usuario pide "audita mis skills instalados", "revisa todos mis skills",
-"qué skills tengo instalados" o similar, ejecuta descubrimiento automático:
+"qué skills tengo instalados" o similar, ejecuta descubrimiento automático
+adaptado a la plataforma detectada en 1.0.
 
+**macOS y Linux:**
 ```bash
 # Skills globales del usuario
 ls -1 ~/.claude/skills/ 2>/dev/null
@@ -77,8 +109,24 @@ ls -1 ~/.claude/skills/ 2>/dev/null
 ls -1 .claude/skills/ 2>/dev/null
 ```
 
+**Windows (PowerShell):**
+```powershell
+# Skills globales del usuario
+Get-ChildItem -Directory "$env:USERPROFILE\.claude\skills" -ErrorAction SilentlyContinue
+
+# Skills del proyecto actual
+Get-ChildItem -Directory ".claude\skills" -ErrorAction SilentlyContinue
+```
+
+**Windows (cmd.exe):**
+```cmd
+dir /b /ad "%USERPROFILE%\.claude\skills" 2>nul
+dir /b /ad ".claude\skills" 2>nul
+```
+
 Para cada subdirectorio encontrado, ejecuta el pipeline completo (Pasos 1c → 6a)
-y al final genera un dashboard comparativo (Paso 6b).
+y al final genera un dashboard comparativo (Paso 6b). El inventario funciona
+igual en las tres plataformas porque `Glob` de Claude Code es portable.
 
 ### 1c — Inventariar los archivos del skill
 
@@ -195,6 +243,73 @@ require\(['\"]http['\"]\)
 fetch\(.*credentials\s*:
 ```
 
+### 🔴 Crítico — específicos de Windows (`.ps1`, `.psm1`, `.bat`, `.cmd`)
+
+Aplica estos patrones siempre, independientemente de la plataforma del host:
+un skill puede contener scripts de Windows aunque lo audites desde macOS, y
+muchos ataques cross-platform invocan PowerShell desde Bash o viceversa.
+
+```
+# Download-and-execute cradles (PowerShell)
+Invoke-Expression.*DownloadString
+IEX.*DownloadString
+\.DownloadString\(
+\.DownloadFile\(
+Invoke-WebRequest.*\|\s*Invoke-Expression
+iwr.*\|\s*iex
+Net\.WebClient
+
+# PowerShell codificado (evasión AMSI / logging)
+powershell.*-enc\b
+powershell.*-encodedcommand
+powershell.*-e\s+[A-Za-z0-9+/=]{20,}
+FromBase64String.*Invoke-Expression
+
+# LOLBins de descarga y ejecución
+certutil.*-urlcache
+certutil.*-decode
+certutil.*-decodehex
+bitsadmin.*\/transfer
+regsvr32.*\/s.*scrobj
+mshta.*https?://
+rundll32.*javascript
+rundll32.*url\.dll
+
+# Persistencia vía registro
+reg add.*\\Run\b
+reg add.*\\RunOnce\b
+New-ItemProperty.*\\Run\b
+Set-ItemProperty.*\\Run\b
+HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
+HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
+HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
+
+# Persistencia vía tareas programadas y servicios
+schtasks.*\/create
+New-ScheduledTask
+Register-ScheduledTask
+New-Service.*-BinaryPathName
+sc\.exe\s+create
+
+# Credenciales y material sensible en Windows
+%USERPROFILE%\\\.ssh
+%APPDATA%\\Microsoft\\Credentials
+%LOCALAPPDATA%\\Google\\Chrome\\User Data
+%LOCALAPPDATA%\\Microsoft\\Edge\\User Data
+\$env:USERPROFILE\\\.ssh
+Get-Credential
+ConvertTo-SecureString.*AsPlainText
+Export-PfxCertificate
+
+# Evasión, elevación y desactivación de defensas
+Set-ExecutionPolicy\s+Bypass
+-ExecutionPolicy\s+Bypass
+-ExecutionPolicy\s+Unrestricted
+Start-Process.*-Verb\s+RunAs
+Add-MpPreference.*ExclusionPath
+Set-MpPreference.*DisableRealtimeMonitoring
+```
+
 ### 🟠 Alto — revisión manual (universales)
 
 ```
@@ -285,8 +400,16 @@ Para cada archivo del inventario actual:
 - **Archivo que estaba pero ya no está** → 🟡 MEDIO: informar; puede ser limpieza
   legítima o borrado de rastros.
 
-Calcula los hashes con `shasum -a 256 {archivo}` (macOS) o `sha256sum {archivo}`
-(Linux).
+Calcula los hashes según la plataforma detectada en el Paso 1.0:
+
+- **macOS**: `shasum -a 256 {archivo}`
+- **Linux**: `sha256sum {archivo}`
+- **Windows (PowerShell)**: `Get-FileHash -Algorithm SHA256 {archivo}`
+- **Windows (cmd.exe)**: `certutil -hashfile {archivo} SHA256`
+
+Normaliza todos los hashes a minúsculas hex (64 caracteres) antes de comparar,
+porque `certutil` usa mayúsculas y `Get-FileHash` devuelve un objeto con el hash
+en mayúsculas.
 
 Si no hay registro previo, salta este paso sin generar hallazgos.
 
@@ -689,9 +812,14 @@ para que la decisión sea transparente.
 
 ## Registro de auditorías
 
-Mantén un registro mínimo en `~/.claude/skill-audits.json` (global) o
-`.claude/skill-audits.json` (proyecto). Escribe solo metadatos, nunca contenido
-de archivos:
+Mantén un registro mínimo en la ruta global correspondiente a la plataforma:
+
+- **macOS/Linux**: `~/.claude/skill-audits.json`
+- **Windows**: `%USERPROFILE%\.claude\skill-audits.json` (PowerShell:
+  `$env:USERPROFILE\.claude\skill-audits.json`)
+
+O en `.claude/skill-audits.json` (proyecto) en cualquier plataforma. Escribe
+solo metadatos, nunca contenido de archivos:
 
 ```json
 {
@@ -700,6 +828,7 @@ de archivos:
       "name": "nombre-del-skill",
       "source": "url-o-ruta",
       "location": "~/.claude/skills/nombre-del-skill",
+      "platform": "macOS|Linux|Windows",
       "date": "2026-04-15T10:00:00Z",
       "verdict": "APTO|PRECAUCIÓN|NO_INSTALAR",
       "critical_findings": 0,
