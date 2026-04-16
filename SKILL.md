@@ -2,12 +2,14 @@
 name: skill-auditor
 description: >
   Auditor de seguridad para Claude Skills y MCP servers. Audita el árbol completo
-  del skill (SKILL.md + scripts, helpers y assets auxiliares), verifica integridad
-  contra la fuente original, consulta bases de vulnerabilidades acreditadas
-  (GitHub Advisory DB, OSV.dev, Snyk), evalúa coherencia entre propósito y acciones,
-  y entrega recomendaciones accionables por hallazgo. También funciona en modo
-  descubrimiento para escanear todos los skills ya instalados en ~/.claude/skills
-  y .claude/skills del proyecto, detectando drift contra auditorías previas.
+  del skill (SKILL.md + scripts, helpers y assets), verifica integridad, autoría y
+  reputación del publicador, analiza dependencias transitivas (SCA), consulta bases
+  de vulnerabilidades (GitHub Advisory DB, OSV.dev, Snyk), evalúa coherencia entre
+  propósito y acciones, y entrega un score numérico (0-100) con recomendaciones
+  accionables. Funciona en modo descubrimiento para auditar todos los skills
+  instalados con dashboard comparativo, detecta drift contra auditorías previas,
+  exporta reportes a archivo (.md y .json), y soporta modo watch para re-auditoría
+  automática vía hooks de Claude Code. Cross-platform: macOS, Linux y Windows.
   Activar cuando el usuario diga: "audita este skill", "revisa este SKILL.md",
   "¿es seguro instalar X?", "verifica la integridad de", "analiza este MCP",
   "audita mis skills instalados", "revisa todos mis skills", "qué skills tengo
@@ -625,6 +627,140 @@ Si ninguna fuente retorna resultados:
 
 ---
 
+## Paso 4b — Análisis de dependencias transitivas (SCA)
+
+Un skill puede estar limpio y aun así depender de un paquete comprometido. Este
+paso actúa como mini Software Composition Analysis (SCA) sobre los manifiestos
+de dependencias dentro del árbol del skill.
+
+### 4b.1 — Detectar manifiestos
+
+Usa `Glob` para buscar archivos de dependencias en el árbol del skill:
+
+```
+package.json
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+requirements.txt
+Pipfile
+Pipfile.lock
+pyproject.toml
+poetry.lock
+go.mod
+go.sum
+Cargo.toml
+Cargo.lock
+Gemfile
+Gemfile.lock
+composer.json
+composer.lock
+```
+
+Si no hay ningún manifiesto, salta este paso y repórtalo:
+> ℹ️ Sin manifiestos de dependencias en el árbol. Paso 4b omitido.
+
+### 4b.2 — Extraer la lista de dependencias
+
+Para cada manifiesto encontrado, extrae las dependencias directas con nombre
+y versión (o rango). Prioriza los lockfiles cuando existan porque contienen
+versiones exactas resueltas.
+
+| Manifiesto | Cómo extraer |
+|------------|-------------|
+| `package.json` | Lee `dependencies` y `devDependencies` |
+| `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` | Versiones resueltas exactas |
+| `requirements.txt` | Una dependencia por línea, parsea `==`, `>=`, `~=` |
+| `Pipfile.lock` / `poetry.lock` | Versiones exactas en JSON/TOML |
+| `pyproject.toml` | Sección `[project.dependencies]` o `[tool.poetry.dependencies]` |
+| `go.mod` | Líneas `require` con versiones semver |
+| `Cargo.toml` / `Cargo.lock` | `[dependencies]` con versiones |
+| `Gemfile.lock` | Bloque `GEM > specs:` con versiones resueltas |
+| `composer.lock` | Objeto `packages[].name` + `packages[].version` |
+
+Genera una tabla resumen:
+
+```
+DEPENDENCIAS DETECTADAS
+  Manifiesto: package-lock.json
+  Directas:   12
+  Total (con transitivas en lockfile): 87
+
+  Paquete                  Versión    Ecosistema
+  ─────────────────────────────────────────────
+  express                  4.18.2     npm
+  axios                    1.6.2      npm
+  lodash                   4.17.21    npm
+  ...
+```
+
+### 4b.3 — Consultar dependencias en bases de vulnerabilidades
+
+Para cada dependencia extraída, consulta las mismas tres bases del Paso 4.
+Prioriza las búsquedas por ecosistema:
+
+**npm:**
+```
+WebSearch: site:github.com/advisories "{paquete}" npm
+WebFetch: https://registry.npmjs.org/{paquete} → check "deprecated" field
+```
+
+**PyPI:**
+```
+WebSearch: site:github.com/advisories "{paquete}" pip
+WebSearch: site:osv.dev "{paquete}" PyPI
+```
+
+**Go / Cargo / RubyGems / Composer:**
+```
+WebSearch: site:osv.dev "{paquete}" {ecosistema}
+```
+
+Si el árbol tiene muchas dependencias (>50), agrupa las búsquedas por lotes y
+prioriza las dependencias directas sobre las transitivas. Reporta al usuario
+si truncas la búsqueda y por qué:
+> ℹ️ Se encontraron {N} dependencias. Se priorizaron las {M} directas y las
+> transitivas más descargadas. Para un SCA completo, usa una herramienta
+> dedicada como `npm audit`, `pip-audit` o `cargo audit`.
+
+### 4b.4 — Evaluar resultados
+
+Para cada dependencia con CVE conocido, reporta con el formato estándar:
+
+```
+🔴 DEPENDENCIA VULNERABLE: {paquete}@{versión} ({ecosistema})
+   CVE:           {CVE-ID}
+   Severidad:     {CVSS score} ({Critical|High|Medium|Low})
+   Rango afectado: {versiones vulnerables}
+   Fix disponible: {versión parcheada o "no disponible"}
+   Impacto:       {qué permite explotar este CVE en el contexto del skill}
+   Recomendación: {actualizar a X | reemplazar por Y | evaluar si el skill
+                   realmente usa la funcionalidad afectada}
+```
+
+Clasifica los hallazgos de dependencias:
+- **CVE Critical/High** → 🔴 Crítico para el skill
+- **CVE Medium** → 🟠 Alto para el skill
+- **CVE Low** → 🟡 Medio para el skill
+- **Paquete deprecated sin CVE** → 🟡 Medio (riesgo de abandono)
+- **Sin lockfile y rangos amplios** (`*`, `>=1.0.0`) → 🟠 Alto (no
+  reproducible, vulnerable a dependency confusion)
+
+### 4b.5 — Salida de este paso
+
+```
+DEPENDENCIAS Y SCA
+  Manifiestos encontrados:     [N]
+  Dependencias directas:       [N]
+  Dependencias totales:        [N] (si hay lockfile)
+  Con CVE crítico/alto:        [N] → detalles en hallazgos
+  Con CVE medio/bajo:          [N]
+  Deprecated:                  [N]
+  Sin lockfile (rangos sueltos): [sí/no] → riesgo de supply chain
+```
+
+---
+
 ## Paso 5 — Análisis de coherencia
 
 El objetivo es evaluar si las acciones del skill son consistentes con su propósito
@@ -696,7 +832,7 @@ Raíz analizada: [ruta o URL]
 Archivos auditados: [N] ([M] .md, [P] .sh, [Q] .py, ...)
 ═══════════════════════════════════════════════════════
 
-VEREDICTO: ✅ APTO / ⚠️ PRECAUCIÓN / 🚫 NO INSTALAR
+VEREDICTO: ✅ APTO / ⚠️ PRECAUCIÓN / 🚫 NO INSTALAR  (score: XX/100)
 
 RESUMEN EJECUTIVO
 [2-3 oraciones con lo más importante]
@@ -728,11 +864,21 @@ DRIFT vs AUDITORÍA PREVIA
 VULNERABILIDADES CONOCIDAS
   → [CVEs encontrados o "sin CVEs conocidos"]
 
+DEPENDENCIAS Y SCA
+  → Manifiestos: [N], Directas: [N], Total: [N]
+  → Con CVEs: [N] (detalles en hallazgos)
+  → Sin lockfile: [sí/no]
+
 COHERENCIA
   → [mapa de coherencia]
 
 INVENTARIO DE RED
   → Dominios contactados: [lista o "ninguno detectado"]
+
+COMPARACIÓN CON AUDITORÍA PREVIA (si existe)
+  → Anterior: {fecha} Score: {N} Veredicto: {X}
+  → Actual:   {fecha} Score: {N} Veredicto: {X}
+  → Cambios:  [delta de hallazgos y score]
 
 RECOMENDACIONES PRIORITARIAS
   1. [acción más urgente, ligada al hallazgo de mayor severidad]
@@ -771,11 +917,11 @@ RESUMEN
 
 TABLA COMPARATIVA
 
-| Skill | Ubicación | Veredicto | 🔴 | 🟠 | 🟡 | Drift | Fuente | Autor |
-|-------|-----------|-----------|----|----|----|-------|--------|-------|
-| foo   | ~/.claude | ✅ APTO    | 0  | 0  | 1  | no    | ok     | 🟢    |
-| bar   | .claude/  | ⚠️ PREC.   | 0  | 2  | 3  | sí    | ok     | 🟡    |
-| baz   | ~/.claude | 🚫 NO      | 1  | 4  | 2  | no    | ?      | 🔴    |
+| Skill | Ubicación | Veredicto | Score | 🔴 | 🟠 | 🟡 | Deps | Drift | Fuente | Autor |
+|-------|-----------|-----------|-------|----|----|----|----- |-------|--------|-------|
+| foo   | ~/.claude | ✅ APTO    | 91    | 0  | 0  | 1  | 0    | no    | ok     | 🟢    |
+| bar   | .claude/  | ⚠️ PREC.   | 62    | 0  | 2  | 3  | 1    | sí    | ok     | 🟡    |
+| baz   | ~/.claude | 🚫 NO      | 18    | 1  | 4  | 2  | 3    | no    | ?      | 🔴    |
 
 ACCIONES RECOMENDADAS EN ORDEN DE PRIORIDAD
 
@@ -785,6 +931,117 @@ ACCIONES RECOMENDADAS EN ORDEN DE PRIORIDAD
 ```
 
 Tras el dashboard, entrega un reporte individual (6a) por cada skill.
+
+### 6c — Exportar reporte a archivo
+
+Después de mostrar el reporte en el chat, ofrece siempre al usuario exportarlo
+a disco para trazabilidad y comparación entre versiones. Si el usuario acepta
+(o si lo pide explícitamente: "exporta el reporte", "guarda la auditoría"),
+escribe dos archivos:
+
+**Directorio de reportes** (créalo si no existe):
+- **macOS/Linux**: `~/.claude/skill-audit-reports/`
+- **Windows**: `%USERPROFILE%\.claude\skill-audit-reports\`
+
+**Archivo Markdown** — para lectura humana:
+```
+~/.claude/skill-audit-reports/{nombre-skill}_{YYYY-MM-DD}.md
+```
+
+Contiene exactamente el mismo reporte del chat (formato 6a), incluyendo el
+score numérico. Agrega un encabezado YAML frontmatter para facilitar búsqueda:
+
+```yaml
+---
+skill: nombre-del-skill
+date: 2026-04-15
+verdict: PRECAUCIÓN
+score: 62
+platform: macOS
+author_tier: ALTA_CONFIANZA
+---
+```
+
+**Archivo JSON** — para consumo programático:
+```
+~/.claude/skill-audit-reports/{nombre-skill}_{YYYY-MM-DD}.json
+```
+
+Schema del JSON:
+
+```json
+{
+  "skill": "nombre-del-skill",
+  "date": "2026-04-15T10:00:00Z",
+  "platform": "macOS",
+  "verdict": "PRECAUCIÓN",
+  "score": 62,
+  "source": "https://github.com/owner/repo",
+  "files_audited": 7,
+  "findings": {
+    "critical": [
+      {
+        "file": "scripts/sync.sh",
+        "line": 12,
+        "pattern": "curl -X POST ...",
+        "impact": "...",
+        "recommendation": "..."
+      }
+    ],
+    "high": [],
+    "medium": []
+  },
+  "integrity": {
+    "verified": true,
+    "files_checked": 7,
+    "mismatches": []
+  },
+  "author": {
+    "owner": "...",
+    "tier": "ALTA_CONFIANZA",
+    "score": 6,
+    "typosquat_warning": false
+  },
+  "drift": {
+    "detected": false,
+    "changed_files": [],
+    "new_files": [],
+    "deleted_files": []
+  },
+  "cves": [],
+  "dependencies": {
+    "manifests_found": 1,
+    "direct": 12,
+    "total": 87,
+    "vulnerable": []
+  },
+  "coherence": {
+    "purpose": "...",
+    "incoherences": [],
+    "questionable": []
+  },
+  "recommendations": [
+    "..."
+  ]
+}
+```
+
+Si el usuario auditó múltiples skills en modo descubrimiento, exporta el
+dashboard como un archivo adicional:
+```
+~/.claude/skill-audit-reports/dashboard_{YYYY-MM-DD}.md
+~/.claude/skill-audit-reports/dashboard_{YYYY-MM-DD}.json
+```
+
+Si ya existe un reporte del mismo skill con la misma fecha, agrega un sufijo
+incremental: `{nombre-skill}_{YYYY-MM-DD}_2.md`.
+
+**Notas de seguridad del export:**
+- Nunca incluyas contenido de los archivos analizados en el JSON, solo
+  metadatos, líneas de hallazgo y recomendaciones.
+- Los reportes pueden contener rutas del filesystem local. Si el usuario
+  planea compartirlos, avísale que revise el JSON por rutas sensibles antes
+  de publicarlo.
 
 ### Criterios del veredicto
 
@@ -807,6 +1064,65 @@ Ajuste por reputación (Paso 3b):
 
 Siempre muestra al usuario tanto el veredicto base como el ajuste aplicado,
 para que la decisión sea transparente.
+
+### Score numérico (0–100)
+
+Además del veredicto categórico, calcula un score numérico que resume la salud
+global del skill en un solo número. Esto facilita comparaciones en el dashboard
+y seguimiento del score a lo largo del tiempo.
+
+**Fórmula**: empieza en 100 y resta penalizaciones por hallazgo y dimensión.
+
+| Dimensión | Penalización por hallazgo |
+|-----------|--------------------------|
+| Hallazgo 🔴 crítico | -25 por hallazgo (cap: -75) |
+| Hallazgo 🟠 alto | -10 por hallazgo (cap: -40) |
+| Hallazgo 🟡 medio | -3 por hallazgo (cap: -15) |
+| Integridad no verificada | -10 |
+| Integridad comprometida (diferencias) | -30 |
+| Drift detectado (por archivo) | -5 por archivo con drift (cap: -15) |
+| CVE crítico/alto en dependencia | -15 por CVE (cap: -45) |
+| CVE medio en dependencia | -5 por CVE (cap: -15) |
+| Sin lockfile con rangos sueltos | -10 |
+| Incoherencia crítica | -20 por incoherencia (cap: -40) |
+| Incoherencia alta | -8 por incoherencia (cap: -24) |
+
+**Bonificaciones** (solo suman, nunca superan 100):
+
+| Condición | Bonificación |
+|-----------|-------------|
+| Reputación 🟢 ALTA CONFIANZA | +5 |
+| Integridad 100% verificada | +5 |
+| Sin dependencias o todas sin CVEs | +3 |
+| Coherencia perfecta (todo ✅) | +3 |
+
+**El score mínimo es 0**, nunca negativo.
+
+**Traducción a veredicto categórico** (si difiere del veredicto por reglas,
+usa el más conservador de los dos):
+
+```
+score 80–100  →  ✅ APTO
+score 40–79   →  ⚠️ PRECAUCIÓN
+score 0–39    →  🚫 NO INSTALAR
+```
+
+**Excepción**: un solo hallazgo 🔴 fuerza 🚫 NO INSTALAR independientemente
+del score numérico. El score complementa el veredicto, no lo reemplaza.
+
+Muestra el score en el reporte:
+```
+VEREDICTO: ⚠️ PRECAUCIÓN (score: 62/100)
+```
+
+Y en el dashboard:
+```
+| Skill | ... | Score |
+|-------|-----|-------|
+| foo   | ... | 91    |
+| bar   | ... | 62    |
+| baz   | ... | 18    |
+```
 
 ---
 
@@ -831,6 +1147,7 @@ solo metadatos, nunca contenido de archivos:
       "platform": "macOS|Linux|Windows",
       "date": "2026-04-15T10:00:00Z",
       "verdict": "APTO|PRECAUCIÓN|NO_INSTALAR",
+      "score": 62,
       "critical_findings": 0,
       "high_findings": 0,
       "medium_findings": 0,
@@ -841,6 +1158,15 @@ solo metadatos, nunca contenido de archivos:
         "scripts/sync.sh": "sha256:def456…",
         "helpers/util.py": "sha256:ghi789…"
       },
+      "dependencies": {
+        "manifests": 1,
+        "direct": 12,
+        "total": 87,
+        "vulnerable_critical": 0,
+        "vulnerable_medium": 1,
+        "deprecated": 0,
+        "no_lockfile": false
+      },
       "author": {
         "owner": "anthropics",
         "type": "Organization",
@@ -848,6 +1174,10 @@ solo metadatos, nunca contenido de archivos:
         "in_allowlist": true,
         "score": 6,
         "tier": "ALTA_CONFIANZA"
+      },
+      "report_exported": {
+        "md": "~/.claude/skill-audit-reports/nombre-del-skill_2026-04-15.md",
+        "json": "~/.claude/skill-audit-reports/nombre-del-skill_2026-04-15.json"
       }
     }
   ]
@@ -856,6 +1186,85 @@ solo metadatos, nunca contenido de archivos:
 
 Este registro permite la detección de drift del Paso 2b: si alguno de los hashes
 cambia entre escaneos, el skill fue modificado después de la auditoría.
+
+---
+
+## Modo watch — Re-auditoría automática
+
+El modo watch permite que el skill-auditor se ejecute automáticamente cuando un
+skill se instala, actualiza o modifica, sin que el usuario tenga que pedirlo.
+Esto se configura como un **hook de Claude Code** en `settings.json`.
+
+### Configuración del hook
+
+Agrega la siguiente entrada al `settings.json` global de Claude Code
+(`~/.claude/settings.json` en macOS/Linux, `%USERPROFILE%\.claude\settings.json`
+en Windows):
+
+```json
+{
+  "hooks": {
+    "post-tool-use": [
+      {
+        "description": "Auto-audit skills after installation or update",
+        "match_tool": "Write|Bash",
+        "match_content": "skills/.*SKILL\\.md|skill.*install|skill.*clone",
+        "command": "echo 'SKILL_CHANGED: A skill file was written or installed. Run: audita el skill en {file_path}'"
+      }
+    ]
+  }
+}
+```
+
+Este hook detecta cuando se escribe un `SKILL.md` dentro de un directorio de
+skills y genera un recordatorio para que Claude dispare la auditoría en la
+misma sesión.
+
+### Re-auditoría por drift programada
+
+Para equipos o usuarios que quieran auditorías periódicas, se puede configurar
+un **trigger de Claude Code** (agente remoto programado):
+
+```
+/schedule create --name "weekly-skill-audit" \
+  --cron "0 9 * * 1" \
+  --prompt "audita mis skills instalados. Si alguno tiene drift o CVEs nuevos, exporta el reporte y notifícame."
+```
+
+Esto ejecuta una auditoría completa de todos los skills instalados cada lunes
+a las 9 AM.
+
+### Flujo del modo watch
+
+```
+Evento: archivo de skill escrito/modificado
+  │
+  ├── Hook detecta la escritura
+  │   └── Claude ejecuta auditoría automática del skill afectado
+  │       ├── Score previo existe? → compara scores
+  │       │   ├── Score bajó → 🟠 alerta al usuario con diff de hallazgos
+  │       │   └── Score igual/subió → ℹ️ nota informativa
+  │       └── Score previo no existe → primera auditoría, registra baseline
+  │
+  └── Exporta reporte si configurado (6c)
+```
+
+### Comparación de scores entre versiones
+
+Cuando el modo watch detecta un skill que ya fue auditado previamente, el
+reporte incluye una sección adicional:
+
+```
+COMPARACIÓN CON AUDITORÍA PREVIA
+  Auditoría anterior:  2026-04-10  Score: 85  Veredicto: ✅ APTO
+  Auditoría actual:    2026-04-15  Score: 62  Veredicto: ⚠️ PRECAUCIÓN
+
+  Cambios:
+    ↑ Hallazgos 🔴: 0 → 1 (+1)
+    ↑ Hallazgos 🟠: 1 → 3 (+2)
+    = Hallazgos 🟡: 2 → 2
+    ⚠️ Score descendió 23 puntos — revisa los nuevos hallazgos.
+```
 
 ---
 
