@@ -40,6 +40,11 @@ específica y recomendaciones accionables.
 - **Fuentes acreditadas únicamente**: GitHub Advisory DB, OSV.dev y Snyk son las
   únicas fuentes de vulnerabilidades aceptadas. Reddit, Discord y foros no son
   threat intelligence.
+- **Reputación modifica, nunca anula**: la reputación del autor (Paso 3b) puede
+  ajustar el umbral del veredicto cuando no hay hallazgos críticos, pero nunca
+  neutraliza un 🔴 ni un CVE con severidad alta. Una compañía reconocida puede
+  publicar un skill comprometido (cuenta hackeada, empleado malicioso, dependency
+  confusion). Evidencia > reputación, siempre.
 
 ---
 
@@ -331,6 +336,125 @@ Muestra qué líneas cambiaron, por archivo. Clasifica cada diferencia:
 
 ---
 
+## Paso 3b — Verificación de autoría y reputación
+
+Aplica siempre que el skill tenga un repositorio GitHub identificable (URL
+directa o declarada en el frontmatter). Este paso produce una señal de
+reputación que **modifica el umbral del veredicto** pero nunca anula un
+hallazgo crítico ni un CVE.
+
+### 3b.1 — Extraer el owner y clasificar
+
+Del repo `https://github.com/{owner}/{repo}`, consulta con `WebFetch`:
+
+```
+https://api.github.com/users/{owner}
+```
+
+Si `type == "Organization"`, consulta también:
+
+```
+https://api.github.com/orgs/{owner}
+```
+
+Captura estos campos objetivos:
+- `type` (User u Organization)
+- `created_at` (antigüedad de la cuenta)
+- `followers`
+- `public_repos`
+- `is_verified` (solo orgs — es el badge de GitHub Verified Organization)
+- `blog` y `company` (dominio público declarado)
+- `email` si es público
+
+Si la API no responde o el owner no existe, reporta:
+> ⚠️ No fue posible verificar la autoría. Sin señales de reputación disponibles.
+
+### 3b.2 — Allowlist de vendors confiables
+
+Compara el `owner` contra esta allowlist curada. El match debe ser **exacto**
+(case-insensitive), nunca por substring.
+
+```
+anthropics, vercel, microsoft, github, google, googleapis, aws, amazon,
+netflix, meta, facebook, nodejs, python, rust-lang, golang, denoland,
+stripe, supabase, prisma, netlify, cloudflare, hashicorp, docker,
+kubernetes, openai, huggingface, gitlab, jetbrains, mozilla, apache,
+redhat, ubuntu, debian
+```
+
+Esta lista es un punto de partida. Si el usuario mantiene su propia allowlist
+en `~/.claude/skill-auditor-allowlist.txt` (un owner por línea), cárgala y
+fusiónala con la anterior.
+
+### 3b.3 — Detección de typosquatting
+
+Calcula la distancia de Levenshtein entre el `owner` actual y cada entrada de
+la allowlist. Si `distancia ≤ 2` pero no hay match exacto, reporta como 🟠 ALTO:
+
+> ⚠️ Typosquat sospechoso: el owner `{owner}` difiere en {N} caracteres de
+> `{owner_confiable}` en la allowlist. Verifica que no sea un intento de
+> suplantación.
+
+Ejemplo: `anthr0pic` (distancia 1 de `anthropics`) → sospechoso.
+Ejemplo: `vercell` (distancia 1 de `vercel`) → sospechoso.
+
+### 3b.4 — Score de reputación
+
+Calcula un score entero aplicando estas reglas en orden:
+
+| Condición | Puntos |
+|-----------|--------|
+| Match exacto en la allowlist | +3 |
+| `is_verified: true` (badge de org verificada) | +2 |
+| Cuenta con más de 3 años de antigüedad | +1 |
+| Followers > 1000 (org) o > 500 (user) | +1 |
+| `public_repos > 10` | +1 |
+| Dominio en `blog` con HTTPS y MX válido | +1 |
+| Cuenta con menos de 30 días | -2 |
+| `public_repos == 0` o actividad nula | -2 |
+| Typosquat detectado en 3b.3 | -3 |
+
+### 3b.5 — Traducir score a tier
+
+```
+score ≥ 5  →  🟢 ALTA CONFIANZA
+score 2–4  →  🟡 CONFIANZA MODERADA
+score 0–1  →  ⚪ DESCONOCIDO (sin señales)
+score < 0  →  🔴 SOSPECHOSO
+```
+
+### 3b.6 — Cómo la reputación afecta el veredicto
+
+La reputación **modifica el umbral**, no los hallazgos:
+
+- **🟢 ALTA CONFIANZA**: si no hay críticos y los altos son ≤ 2, puede
+  considerarse ✅ APTO en lugar de ⚠️ PRECAUCIÓN. No cambia nada si hay críticos.
+- **🟡 CONFIANZA MODERADA**: sin efecto. Umbral estándar.
+- **⚪ DESCONOCIDO**: sin efecto, pero anótalo como dato para el usuario.
+- **🔴 SOSPECHOSO**: downgrade automático. Un APTO pasa a ⚠️ PRECAUCIÓN;
+  cualquier crítico combinado con sospecha activa 🚫 NO INSTALAR sin apelación.
+
+### 3b.7 — Salida de este paso
+
+Reporta siempre la señal de reputación como bloque propio, separada del
+análisis estático:
+
+```
+AUTORÍA Y REPUTACIÓN
+  Owner:       {owner}
+  Tipo:        {User|Organization}
+  Antigüedad:  {N años}
+  Followers:   {N}
+  Repos:       {N}
+  Verificado:  {sí|no|no aplica}
+  Allowlist:   {sí|no}
+  Score:       {N}
+  Tier:        🟢 ALTA / 🟡 MODERADA / ⚪ DESCONOCIDO / 🔴 SOSPECHOSO
+  Notas:       [typosquat detectado si aplica, cuenta nueva, etc.]
+```
+
+---
+
 ## Paso 4 — Consulta a bases de datos de vulnerabilidades
 
 Consulta únicamente estas tres fuentes. Son las únicas con datos estructurados y
@@ -470,6 +594,11 @@ HALLAZGOS POR CATEGORÍA
 INTEGRIDAD DE FUENTE
   → [resultado por archivo]
 
+AUTORÍA Y REPUTACIÓN
+  → Owner: {owner} ({tipo}, {antigüedad})
+    Score: {N} → Tier: 🟢 ALTA / 🟡 MODERADA / ⚪ DESCONOCIDO / 🔴 SOSPECHOSO
+    [notas adicionales: allowlist, verificación, typosquat detectado, etc.]
+
 DRIFT vs AUDITORÍA PREVIA
   → [archivos cambiados, nuevos, eliminados — o "sin registro previo"]
 
@@ -489,9 +618,11 @@ RECOMENDACIONES PRIORITARIAS
 
 ALCANCE DE ESTE ANÁLISIS
 Este reporte cubre análisis estático de patrones en todos los archivos del skill,
-verificación de integridad, detección de drift, consulta a bases públicas y
-análisis de coherencia. No reemplaza una auditoría de código profesional.
-Habilidades nuevas sin historial público no pueden ser completamente evaluadas.
+verificación de integridad, verificación de autoría y reputación, detección de
+drift, consulta a bases públicas y análisis de coherencia. No reemplaza una
+auditoría de código profesional. Habilidades nuevas sin historial público no
+pueden ser completamente evaluadas, y una reputación alta no garantiza ausencia
+de comprometimiento.
 
 PRÓXIMOS PASOS RECOMENDADOS
   → [acciones concretas según los hallazgos]
@@ -517,11 +648,11 @@ RESUMEN
 
 TABLA COMPARATIVA
 
-| Skill | Ubicación | Veredicto | 🔴 | 🟠 | 🟡 | Drift | Fuente |
-|-------|-----------|-----------|----|----|----|-------|--------|
-| foo   | ~/.claude | ✅ APTO    | 0  | 0  | 1  | no    | ok     |
-| bar   | .claude/  | ⚠️ PREC.   | 0  | 2  | 3  | sí    | ok     |
-| baz   | ~/.claude | 🚫 NO      | 1  | 4  | 2  | no    | ?      |
+| Skill | Ubicación | Veredicto | 🔴 | 🟠 | 🟡 | Drift | Fuente | Autor |
+|-------|-----------|-----------|----|----|----|-------|--------|-------|
+| foo   | ~/.claude | ✅ APTO    | 0  | 0  | 1  | no    | ok     | 🟢    |
+| bar   | .claude/  | ⚠️ PREC.   | 0  | 2  | 3  | sí    | ok     | 🟡    |
+| baz   | ~/.claude | 🚫 NO      | 1  | 4  | 2  | no    | ?      | 🔴    |
 
 ACCIONES RECOMENDADAS EN ORDEN DE PRIORIDAD
 
@@ -534,13 +665,25 @@ Tras el dashboard, entrega un reporte individual (6a) por cada skill.
 
 ### Criterios del veredicto
 
+Base (antes de aplicar reputación):
+
 - **✅ APTO**: sin hallazgos críticos ni altos, integridad verificada (o no aplica),
   sin CVEs, sin drift no justificado, coherencia correcta.
 - **⚠️ PRECAUCIÓN**: hallazgos altos sin críticos, integridad no verificable, drift
-  detectado sin explicación, o coherencia cuestionable. El usuario decide con
-  información completa.
-- **🚫 NO INSTALAR**: cualquier hallazgo crítico, integridad comprometida (diferencias
-  en código funcional vs original), o CVE de severidad alta/crítica sin parchear.
+  detectado sin explicación, o coherencia cuestionable.
+- **🚫 NO INSTALAR**: cualquier hallazgo crítico, integridad comprometida, o CVE
+  de severidad alta/crítica sin parchear.
+
+Ajuste por reputación (Paso 3b):
+
+- **🟢 ALTA CONFIANZA** puede promover ⚠️ PRECAUCIÓN → ✅ APTO **solo** cuando no
+  hay críticos y los altos son ≤ 2. Nunca promueve 🚫.
+- **🔴 SOSPECHOSO** degrada ✅ APTO → ⚠️ PRECAUCIÓN automáticamente. Si además
+  hay cualquier hallazgo crítico, el veredicto es 🚫 sin apelación.
+- **🟡 MODERADA** y **⚪ DESCONOCIDO** no modifican el veredicto base.
+
+Siempre muestra al usuario tanto el veredicto base como el ajuste aplicado,
+para que la decisión sea transparente.
 
 ---
 
@@ -568,6 +711,14 @@ de archivos:
         "SKILL.md": "sha256:abc123…",
         "scripts/sync.sh": "sha256:def456…",
         "helpers/util.py": "sha256:ghi789…"
+      },
+      "author": {
+        "owner": "anthropics",
+        "type": "Organization",
+        "verified": true,
+        "in_allowlist": true,
+        "score": 6,
+        "tier": "ALTA_CONFIANZA"
       }
     }
   ]
@@ -589,5 +740,9 @@ Comunica estas limitaciones al usuario si son relevantes:
    obfuscados que requieren ejecución para manifestarse.
 4. **Binarios embebidos**: se marcan como anómalos pero no se analizan; requieren
    herramientas dedicadas (reversing, sandboxing).
-5. **Este skill también es un archivo de texto**: aplícale el mismo escepticismo que
+5. **Reputación ≠ seguridad**: una organización reconocida puede publicar un skill
+   comprometido (cuenta hackeada, empleado malicioso, dependency confusion). La
+   reputación del Paso 3b es una señal contextual, no una garantía. Por eso nunca
+   anula hallazgos críticos.
+6. **Este skill también es un archivo de texto**: aplícale el mismo escepticismo que
    aplicarías a cualquier otro. Verifica su integridad desde la fuente antes de usarlo.

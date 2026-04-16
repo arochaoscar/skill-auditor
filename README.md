@@ -1,6 +1,6 @@
 # skill-auditor
 
-Auditor de seguridad para **Claude Skills** y **MCP servers**. Audita el árbol completo del skill —no solo el `SKILL.md`, también scripts auxiliares, helpers y assets— y entrega un veredicto con evidencia específica y recomendaciones accionables por hallazgo: análisis estático de patrones peligrosos por tipo de archivo, verificación de integridad contra la fuente original, detección de drift contra auditorías previas, consulta a bases públicas de vulnerabilidades y evaluación de coherencia entre propósito declarado y acciones reales.
+Auditor de seguridad para **Claude Skills** y **MCP servers**. Audita el árbol completo del skill —no solo el `SKILL.md`, también scripts auxiliares, helpers y assets— y entrega un veredicto con evidencia específica y recomendaciones accionables por hallazgo: análisis estático de patrones peligrosos por tipo de archivo, verificación de integridad contra la fuente original, **verificación de autoría y reputación del publicador** (allowlist de vendors conocidos + detección de typosquatting), detección de drift contra auditorías previas, consulta a bases públicas de vulnerabilidades y evaluación de coherencia entre propósito declarado y acciones reales.
 
 Incluye **modo descubrimiento**: escanea automáticamente todos los skills instalados en `~/.claude/skills/` y `.claude/skills/` del proyecto, y genera un dashboard comparativo con veredicto por skill.
 
@@ -39,9 +39,14 @@ El skill ejecuta un pipeline de pasos:
 2. **Análisis estático multi-lenguaje** — Busca patrones determinísticos **en todos los archivos del árbol**, con reglas específicas por tipo: pipe-to-shell en `.sh`, `eval`/`exec`/`pickle.loads` en `.py`, `new Function`/`child_process` en `.js`, credenciales y exfiltración en cualquier texto. Cada hallazgo incluye archivo:línea, impacto concreto y **recomendación accionable**.
 3. **Detección de drift** — Compara los hashes SHA-256 actuales contra el registro de auditorías previo. Detecta archivos modificados, nuevos o eliminados después de la última revisión.
 4. **Verificación de integridad** — Compara cada archivo contra su versión canónica en GitHub raw. Reporta diferencias clasificadas por severidad.
-5. **Consulta de CVEs** — Busca vulnerabilidades en **GitHub Advisory DB**, **OSV.dev** y **Snyk**. Únicas fuentes aceptadas; foros y redes sociales no cuentan.
-6. **Análisis de coherencia** — Extrae las acciones reales del árbol completo (herramientas, rutas, dominios, dependencias) y las contrasta con el propósito declarado. Un skill que dice "ordenar notas" pero accede a `~/.ssh/` es incoherente.
-7. **Reporte y dashboard** — Para un skill individual: reporte con hallazgos, inventario de red, coherencia y **recomendaciones priorizadas**. En modo descubrimiento: dashboard comparativo con tabla de veredictos por skill y acciones globales en orden de prioridad.
+5. **Verificación de autoría y reputación** — Consulta la GitHub API para extraer señales objetivas del owner (tipo de cuenta, antigüedad, followers, repos públicos, badge de organización verificada). Compara contra una allowlist curada de vendors confiables (Anthropic, Vercel, Microsoft, GitHub, etc.) y detecta typosquatting (distancia de Levenshtein ≤ 2). Calcula un score que se traduce en un tier: 🟢 ALTA, 🟡 MODERADA, ⚪ DESCONOCIDO o 🔴 SOSPECHOSO. El tier **modifica el umbral del veredicto**, pero nunca anula un hallazgo crítico.
+6. **Consulta de CVEs** — Busca vulnerabilidades en **GitHub Advisory DB**, **OSV.dev** y **Snyk**. Únicas fuentes aceptadas; foros y redes sociales no cuentan.
+7. **Análisis de coherencia** — Extrae las acciones reales del árbol completo (herramientas, rutas, dominios, dependencias) y las contrasta con el propósito declarado. Un skill que dice "ordenar notas" pero accede a `~/.ssh/` es incoherente.
+8. **Reporte y dashboard** — Para un skill individual: reporte con hallazgos, inventario de red, autoría/reputación, coherencia y **recomendaciones priorizadas**. En modo descubrimiento: dashboard comparativo con tabla de veredictos por skill y acciones globales en orden de prioridad.
+
+### Allowlist personalizada
+
+Puedes mantener tu propia lista de vendors confiables en `~/.claude/skill-auditor-allowlist.txt` (un owner de GitHub por línea). El skill la fusiona con la allowlist curada en tiempo de auditoría.
 
 Veredictos posibles:
 
@@ -106,6 +111,7 @@ El propio SKILL.md declara sus límites y son importantes:
 - **Skills privados o sin fuente pública**: la verificación de integridad no es posible.
 - **Skills muy nuevos**: probablemente no tendrán CVEs en las bases consultadas — ausencia de CVEs no implica seguridad.
 - **Obfuscación avanzada**: el análisis estático puede no detectar payloads que solo se manifiestan en ejecución.
+- **Reputación ≠ seguridad**: una organización reconocida puede publicar un skill comprometido (cuenta hackeada, empleado malicioso, dependency confusion). El tier de reputación es una señal contextual, no una garantía. Por eso nunca anula hallazgos críticos ni CVEs.
 - **Este skill también es un archivo de texto**: aplícale el mismo escepticismo que a cualquier otro. Verifica su integridad desde esta fuente antes de instalarlo.
 
 Este reporte no reemplaza una auditoría de código profesional.
