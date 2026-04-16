@@ -934,14 +934,45 @@ Tras el dashboard, entrega un reporte individual (6a) por cada skill.
 
 ### 6c — Exportar reporte a archivo
 
-Después de mostrar el reporte en el chat, ofrece siempre al usuario exportarlo
-a disco para trazabilidad y comparación entre versiones. Si el usuario acepta
-(o si lo pide explícitamente: "exporta el reporte", "guarda la auditoría"),
-escribe dos archivos:
+Después de mostrar el reporte en el chat, **pregunta siempre al usuario** dónde
+desea guardar el reporte. Presenta las opciones disponibles y espera su
+aprobación explícita antes de escribir cualquier archivo en disco.
 
-**Directorio de reportes** (créalo si no existe):
+**Flujo obligatorio:**
+
+```
+1. Mostrar el reporte completo en el chat.
+2. Preguntar al usuario:
+
+   "¿Deseas exportar este reporte? Opciones:
+    a) En el directorio global de reportes: ~/.claude/skill-audit-reports/
+    b) En la carpeta del proyecto analizado: {ruta-del-proyecto}/.claude/audit-reports/
+    c) En una ruta personalizada
+    d) No exportar"
+
+3. Esperar la respuesta del usuario.
+4. Solo si el usuario elige a), b) o c), proceder a escribir los archivos.
+5. Si el usuario elige b), verificar que tiene permisos de escritura en el
+   proyecto. Si el directorio del proyecto es de solo lectura o no existe,
+   informar y ofrecer las otras opciones.
+```
+
+**IMPORTANTE**: nunca escribas el reporte en disco sin aprobación explícita
+del usuario. El reporte puede contener rutas, hallazgos y metadatos que el
+usuario puede no querer persistir en un proyecto compartido (por ejemplo, un
+repo público). El consentimiento debe ser por cada auditoría, no blanket.
+
+**Directorios de reportes** (crear si no existe, solo tras aprobación):
+
+Opción a — Global:
 - **macOS/Linux**: `~/.claude/skill-audit-reports/`
 - **Windows**: `%USERPROFILE%\.claude\skill-audit-reports\`
+
+Opción b — En el proyecto analizado:
+- `{raíz-del-proyecto}/.claude/audit-reports/`
+- Agrega `.claude/audit-reports/` al `.gitignore` del proyecto si existe un
+  `.gitignore`, para evitar que los reportes se suban accidentalmente al repo.
+  Pregunta al usuario antes de modificar `.gitignore`.
 
 **Archivo Markdown** — para lectura humana:
 ```
