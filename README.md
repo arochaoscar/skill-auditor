@@ -166,6 +166,31 @@ El propio SKILL.md declara sus límites y son importantes:
 
 Este reporte no reemplaza una auditoría de código profesional.
 
+## Descargo de responsabilidad
+
+**Este skill se proporciona "tal cual" (AS IS), sin garantías de ningún tipo,
+expresas o implícitas.** Su uso no garantiza la detección de todas las
+vulnerabilidades presentes en otros skills, MCP servers, dependencias o en
+el código que estos generen. El análisis estático, la verificación de
+integridad, la consulta a bases de vulnerabilidades y el scoring numérico son
+herramientas de apoyo que reducen el riesgo pero no lo eliminan.
+
+El autor de este skill (**Oscar Arocha / arochaoscar**) no se hace responsable
+por daños directos, indirectos, incidentales o consecuentes derivados del uso
+o la imposibilidad de uso de este skill, incluyendo pero no limitado a:
+pérdida de datos, acceso no autorizado, comprometimiento de sistemas, o
+cualquier consecuencia de instalar un skill o MCP que este auditor haya
+calificado como APTO.
+
+Al usar este skill, aceptas que:
+1. **No es un sustituto de una auditoría de seguridad profesional.**
+2. **La ausencia de hallazgos no implica ausencia de vulnerabilidades.**
+3. **La responsabilidad final de instalar o ejecutar cualquier skill recae
+   enteramente en el usuario.**
+4. **El autor no ofrece soporte ni garantías de disponibilidad, exactitud
+   o actualización de las bases de datos consultadas (GitHub Advisory DB,
+   OSV.dev, Snyk), que son mantenidas por terceros.**
+
 ## Licencia
 
 MIT
